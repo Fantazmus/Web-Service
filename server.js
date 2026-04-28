@@ -1707,7 +1707,9 @@ app.get("/", (req, res) => {
       health: "/health",
       wallet: "/blackrock/:address?limit=80&whaleThreshold=40",
       mtaStatus: "/api/mta-status",
+      serverStatus: "/api/server-status",
       mtaStatusList: "/api/mta-status-list?server=Miami%20RP@46.174.50.52:22101",
+      serverStatusList: "/api/server-status-list?server=Miami%20RP@46.174.50.52:22101",
       mtaPublicServers: "/api/mta-public-servers?includeEmpty=1&limit=5000&sort=players-desc",
       mtaMonitor: "/mta-monitor",
       mtaMonitorEmbed: "/mta-monitor-embed",
@@ -1869,7 +1871,64 @@ app.get("/api/mta-status", async (req, res) => {
   }
 });
 
+app.get("/api/server-status", async (req, res) => {
+  let target = DEFAULT_MTA_TARGET;
+
+  try {
+    target = getRequestedMtaTarget(req.query);
+  } catch (error) {
+    res.status(400).json({
+      ...buildMtaOfflinePayload(DEFAULT_MTA_TARGET, error),
+      error: "INVALID_MTA_TARGET"
+    });
+    return;
+  }
+
+  try {
+    const payload = await getMtaStatusPayload(target);
+    res.json(payload);
+  } catch (error) {
+    res.status(502).json(buildMtaOfflinePayload(target, error));
+  }
+});
+
 app.get("/api/mta-status-list", async (req, res) => {
+  let targets = [];
+
+  try {
+    targets = getRequestedMtaTargets(req.query.server);
+  } catch (error) {
+    res.status(400).json({
+      error: "INVALID_MTA_SERVER_LIST",
+      message: error.message || "Provide valid MTA servers in the query string.",
+      items: []
+    });
+    return;
+  }
+
+  const requestedTargets = targets.length > 0 ? targets : [DEFAULT_MTA_TARGET];
+  const items = await Promise.all(
+    requestedTargets.map(async (target) => {
+      try {
+        return await getMtaStatusPayload(target);
+      } catch (error) {
+        return buildMtaOfflinePayload(target, error);
+      }
+    })
+  );
+
+  const onlineCount = items.filter((item) => item.online !== false).length;
+
+  res.json({
+    total: items.length,
+    onlineCount,
+    offlineCount: items.length - onlineCount,
+    fetchedAt: new Date().toISOString(),
+    items
+  });
+});
+
+app.get("/api/server-status-list", async (req, res) => {
   let targets = [];
 
   try {
