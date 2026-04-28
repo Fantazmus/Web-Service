@@ -1332,12 +1332,25 @@ async function getMtaStatusPayload(target = DEFAULT_MTA_TARGET) {
     };
   }
 
-  const payload = await queryMtaStatus(requestedTarget);
-  setCachedPayload(cacheKey, payload);
-  return {
-    ...payload,
-    cached: false
-  };
+  try {
+    const payload = await queryMtaStatus(requestedTarget);
+    setCachedPayload(cacheKey, payload);
+    return {
+      ...payload,
+      cached: false
+    };
+  } catch (error) {
+    const masterlistPayload = await getMtaMasterlistPayload();
+    const fallbackItem = findMtaMasterlistItem(masterlistPayload, requestedTarget);
+
+    if (!fallbackItem) {
+      throw error;
+    }
+
+    const payload = buildMtaStatusPayloadFromMasterlist(fallbackItem, requestedTarget, error, masterlistPayload);
+    setCachedPayload(cacheKey, payload);
+    return payload;
+  }
 }
 
 function parseMtaMasterlistServerV0(reader) {
@@ -1693,6 +1706,54 @@ function buildMtaMasterlistResponse(masterlistPayload, options) {
       sort: options.sort
     },
     items: returnedItems
+  };
+}
+
+function findMtaMasterlistItem(masterlistPayload, target = DEFAULT_MTA_TARGET) {
+  const requestedTarget = buildMtaTarget(target);
+  const items = Array.isArray(masterlistPayload?.items) ? masterlistPayload.items : [];
+
+  return items.find((item) =>
+    sanitizeMasterlistText(item.ip) === requestedTarget.host &&
+    clampInteger(item.port, 0, 0, 65535) === requestedTarget.port
+  ) || null;
+}
+
+function buildMtaStatusPayloadFromMasterlist(item, target = DEFAULT_MTA_TARGET, error, masterlistPayload = {}) {
+  const requestedTarget = buildMtaTarget(target);
+  const serverPort = clampInteger(item?.port, requestedTarget.port, 1, 65535);
+  const playersOnline = clampInteger(item?.playersOnline, 0, 0, 2000);
+  const maxPlayers = clampInteger(item?.maxPlayers, 0, 0, 2000);
+
+  return {
+    protocol: "masterlist",
+    label: requestedTarget.label,
+    host: requestedTarget.host,
+    port: serverPort,
+    queryPort: requestedTarget.queryPort,
+    serverAddress: `${requestedTarget.host}:${serverPort}`,
+    gameName: sanitizeMasterlistText(item?.gameName) || "mta",
+    serverName: sanitizeMasterlistText(item?.serverName) || requestedTarget.label || "MTA server",
+    gameType: sanitizeMasterlistText(item?.gameType),
+    mapName: sanitizeMasterlistText(item?.mapName),
+    version: sanitizeMasterlistText(item?.version),
+    passworded: Boolean(item?.passworded),
+    playersOnline,
+    maxPlayers,
+    players: Array.isArray(item?.players)
+      ? item.players.map((value) => sanitizeMasterlistText(value)).filter(Boolean)
+      : [],
+    rules: {},
+    latencyMs: null,
+    fetchedAt: masterlistPayload?.fetchedAt || new Date().toISOString(),
+    cached: Boolean(masterlistPayload?.cached),
+    online: true,
+    sourceUrl: masterlistPayload?.sourceUrl || MTA_MASTERLIST_URL,
+    httpPort: clampInteger(item?.httpPort, 0, 0, 65535) || null,
+    httpAddress: sanitizeMasterlistText(item?.httpAddress),
+    message: error?.message
+      ? `Direct query failed, using masterlist fallback: ${error.message}`
+      : "Using masterlist fallback."
   };
 }
 
