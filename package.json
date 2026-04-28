@@ -1,0 +1,17 @@
+{
+  "name": "whale-v8-blackrock",
+  "version": "9.0.0",
+  "type": "module",
+  "description": "ETH whale flow proxy and dashboard with Blackrock-style scoring.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  }
+}

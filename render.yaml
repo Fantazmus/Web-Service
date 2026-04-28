@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: gta-miami-api
+    runtime: node
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: CORS_ORIGIN
+        value: https://gta-miami.ru
+      - key: MTA_HOST
+        value: 46.174.50.52
+      - key: MTA_PORT
+        value: 22101
+      - key: MTA_QUERY_PORT
+        value: 22224
