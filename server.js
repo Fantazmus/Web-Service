@@ -34,7 +34,7 @@ const MTA_COMMUNITY_SERVERS_URL = String(
   process.env.MTA_COMMUNITY_SERVERS_URL || "https://community.multitheftauto.com/index.php?p=servers"
 ).trim();
 const MTA_COMMUNITY_PER_PAGE = clampInteger(process.env.MTA_COMMUNITY_PER_PAGE, 250, 25, 250);
-const MTA_COMMUNITY_MAX_PAGES = clampInteger(process.env.MTA_COMMUNITY_MAX_PAGES, 4, 1, 20);
+const MTA_COMMUNITY_MAX_PAGES = clampInteger(process.env.MTA_COMMUNITY_MAX_PAGES, 8, 1, 20);
 const VK_ACCESS_TOKEN = String(process.env.VK_ACCESS_TOKEN || "").trim();
 const VK_API_VERSION = String(process.env.VK_API_VERSION || "5.199").trim();
 const DEFAULT_VK_DOMAIN = sanitizeVkDomain(process.env.VK_WALL_DOMAIN || "mta.miami");
@@ -1625,6 +1625,23 @@ function parseMtaCommunitySummary(html) {
   };
 }
 
+function parseMtaCommunityLastPage(html) {
+  const text = String(html || "");
+  const pageMatches = text.match(/page=(\d+)/gi) || [];
+  let maxPage = 1;
+
+  pageMatches.forEach((matchValue) => {
+    const pageMatch = /page=(\d+)/i.exec(matchValue);
+    const page = pageMatch ? Number.parseInt(pageMatch[1], 10) : 1;
+
+    if (Number.isFinite(page) && page > maxPage) {
+      maxPage = page;
+    }
+  });
+
+  return maxPage;
+}
+
 function parseMtaCommunityRows(html) {
   const rows = [];
   const rowPattern = /<tr>\s*<td[^>]*>[\s\S]*?<\/td>\s*<td>\s*(\d+)\s*\/\s*(\d+)\s*<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td>\s*([^<]+?)\s*<\/td>\s*<td>\s*<a[^>]+href="mtasa:\/\/([^"]+)"/gi;
@@ -1671,16 +1688,22 @@ async function getMtaCommunityFallbackPayload(masterlistError) {
   const allItems = [];
   const seenAddresses = new Set();
   let summary = null;
+  let lastPage = MTA_COMMUNITY_MAX_PAGES;
 
   for (let page = 1; page <= MTA_COMMUNITY_MAX_PAGES; page += 1) {
     const pageUrl = buildMtaCommunityPageUrl(page);
     const htmlBuffer = await getBinary(pageUrl, "MTA Community server list", MTA_MASTERLIST_TIMEOUT_MS);
     const html = htmlBuffer.toString("utf8");
     const pageSummary = parseMtaCommunitySummary(html);
+    const parsedLastPage = parseMtaCommunityLastPage(html);
     const pageItems = parseMtaCommunityRows(html);
 
     if (!summary) {
       summary = pageSummary;
+    }
+
+    if (page === 1) {
+      lastPage = Math.min(MTA_COMMUNITY_MAX_PAGES, Math.max(1, parsedLastPage || 1));
     }
 
     for (const item of pageItems) {
@@ -1696,11 +1719,11 @@ async function getMtaCommunityFallbackPayload(masterlistError) {
       break;
     }
 
-    if (summary?.totalServers && allItems.length >= summary.totalServers) {
+    if (pageItems.length < MTA_COMMUNITY_PER_PAGE) {
       break;
     }
 
-    if (pageItems.length < MTA_COMMUNITY_PER_PAGE) {
+    if (page >= lastPage) {
       break;
     }
   }
