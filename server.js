@@ -1756,7 +1756,7 @@ async function getMtaMasterlistPayload() {
   const cacheKey = "mta-masterlist:all";
   const cached = getCachedPayload(cacheKey, MTA_MASTERLIST_CACHE_TTL_MS);
 
-  if (cached) {
+  if (cached?.items && Array.isArray(cached.items) && cached.items.length) {
     return {
       ...cached,
       cached: true
@@ -1766,6 +1766,9 @@ async function getMtaMasterlistPayload() {
   try {
     const rawBuffer = await getBinary(MTA_MASTERLIST_URL, "MTA masterlist", MTA_MASTERLIST_TIMEOUT_MS);
     const parsed = parseMtaMasterlistBuffer(rawBuffer);
+    if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
+      throw new Error("MTA masterlist returned zero servers.");
+    }
     const payload = {
       ...parsed,
       sourceUrl: MTA_MASTERLIST_URL,
