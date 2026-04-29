@@ -29,7 +29,12 @@ const MTA_STATUS_CACHE_TTL_MS = clampInteger(process.env.MTA_STATUS_CACHE_TTL_MS
 const MTA_MASTERLIST_URL = String(process.env.MTA_MASTERLIST_URL || "https://master.multitheftauto.com/ase/mta/").trim();
 const MTA_MASTERLIST_TIMEOUT_MS = clampInteger(process.env.MTA_MASTERLIST_TIMEOUT_MS, 12000, 2000, 60000);
 const MTA_MASTERLIST_CACHE_TTL_MS = clampInteger(process.env.MTA_MASTERLIST_CACHE_TTL_MS, 300000, 5000, 3600000);
-const DEFAULT_MTA_MASTERLIST_LIMIT = clampInteger(process.env.DEFAULT_MTA_MASTERLIST_LIMIT, 5000, 1, 10000);
+const DEFAULT_MTA_MASTERLIST_LIMIT = clampInteger(process.env.DEFAULT_MTA_MASTERLIST_LIMIT, 10000, 1, 10000);
+const MTA_COMMUNITY_SERVERS_URL = String(
+  process.env.MTA_COMMUNITY_SERVERS_URL || "https://community.multitheftauto.com/index.php?p=servers"
+).trim();
+const MTA_COMMUNITY_PER_PAGE = clampInteger(process.env.MTA_COMMUNITY_PER_PAGE, 250, 25, 250);
+const MTA_COMMUNITY_MAX_PAGES = clampInteger(process.env.MTA_COMMUNITY_MAX_PAGES, 4, 1, 20);
 const VK_ACCESS_TOKEN = String(process.env.VK_ACCESS_TOKEN || "").trim();
 const VK_API_VERSION = String(process.env.VK_API_VERSION || "5.199").trim();
 const DEFAULT_VK_DOMAIN = sanitizeVkDomain(process.env.VK_WALL_DOMAIN || "mta.miami");
@@ -227,6 +232,30 @@ function sanitizeMasterlistText(value) {
     .replace(/[\u0000-\u001f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&#(\d+);/g, (_, decimalValue) => {
+      const codePoint = Number.parseInt(decimalValue, 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : " ";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hexValue) => {
+      const codePoint = Number.parseInt(hexValue, 16);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : " ";
+    })
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&#x27;/gi, "'")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function sanitizeCommunityText(value) {
+  return sanitizeMasterlistText(
+    decodeHtmlEntities(String(value || "").replace(/<[^>]+>/g, " "))
+  );
 }
 
 function sanitizeMasterlistSearch(value) {
@@ -1568,6 +1597,138 @@ function parseMtaMasterlistBuffer(rawBuffer) {
   };
 }
 
+function buildMtaCommunityPageUrl(page = 1, perPage = MTA_COMMUNITY_PER_PAGE) {
+  const url = new URL(MTA_COMMUNITY_SERVERS_URL);
+  url.searchParams.set("page", String(clampInteger(page, 1, 1, 999)));
+  url.searchParams.set("perpage", String(clampInteger(perPage, MTA_COMMUNITY_PER_PAGE, 25, 250)));
+  return url.toString();
+}
+
+function parseMtaCommunitySummary(html) {
+  const text = String(html || "");
+  const summaryMatch = /<p>\s*([\d,]+)\s+players online right now on\s+([\d,]+)\s+public v1\.6 servers\s*<\/p>/i.exec(text);
+  const loadedMatch = /<p>\s*List loaded at\s*([^<]+?)\s*<\/p>/i.exec(text);
+  const totalPlayers = summaryMatch
+    ? Number.parseInt(String(summaryMatch[1]).replace(/[^\d]/g, ""), 10) || 0
+    : 0;
+  const totalServers = summaryMatch
+    ? Number.parseInt(String(summaryMatch[2]).replace(/[^\d]/g, ""), 10) || 0
+    : 0;
+  const loadedAt = loadedMatch ? new Date(String(loadedMatch[1]).trim()) : null;
+
+  return {
+    totalPlayers,
+    totalServers,
+    fetchedAt: loadedAt instanceof Date && !Number.isNaN(loadedAt.getTime())
+      ? loadedAt.toISOString()
+      : new Date().toISOString()
+  };
+}
+
+function parseMtaCommunityRows(html) {
+  const rows = [];
+  const rowPattern = /<tr>\s*<td[^>]*>[\s\S]*?<\/td>\s*<td>\s*(\d+)\s*\/\s*(\d+)\s*<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td>\s*([^<]+?)\s*<\/td>\s*<td>\s*<a[^>]+href="mtasa:\/\/([^"]+)"/gi;
+  let match;
+
+  while ((match = rowPattern.exec(String(html || ""))) !== null) {
+    const playersOnline = clampInteger(match[1], 0, 0, 2000);
+    const maxPlayers = clampInteger(match[2], 0, 0, 2000);
+    const serverName = sanitizeCommunityText(match[3]) || "MTA Server";
+    const address = sanitizeCommunityText(match[4] || match[5]);
+    const [ip = "", rawPort = "0"] = address.split(":");
+    const port = clampInteger(rawPort, 0, 0, 65535);
+
+    if (!ip || !port) {
+      continue;
+    }
+
+    rows.push({
+      ip: sanitizeMasterlistText(ip),
+      port,
+      address: `${sanitizeMasterlistText(ip)}:${port}`,
+      playersOnline,
+      maxPlayers,
+      utilizationPercent: maxPlayers > 0
+        ? Number(((playersOnline / maxPlayers) * 100).toFixed(1))
+        : null,
+      gameName: "mta",
+      serverName,
+      gameType: "",
+      mapName: "",
+      version: "",
+      passworded: false,
+      serials: 0,
+      players: [],
+      httpPort: null,
+      httpAddress: ""
+    });
+  }
+
+  return rows;
+}
+
+async function getMtaCommunityFallbackPayload(masterlistError) {
+  const allItems = [];
+  const seenAddresses = new Set();
+  let summary = null;
+
+  for (let page = 1; page <= MTA_COMMUNITY_MAX_PAGES; page += 1) {
+    const pageUrl = buildMtaCommunityPageUrl(page);
+    const htmlBuffer = await getBinary(pageUrl, "MTA Community server list", MTA_MASTERLIST_TIMEOUT_MS);
+    const html = htmlBuffer.toString("utf8");
+    const pageSummary = parseMtaCommunitySummary(html);
+    const pageItems = parseMtaCommunityRows(html);
+
+    if (!summary) {
+      summary = pageSummary;
+    }
+
+    for (const item of pageItems) {
+      if (!item.address || seenAddresses.has(item.address)) {
+        continue;
+      }
+
+      seenAddresses.add(item.address);
+      allItems.push(item);
+    }
+
+    if (!pageItems.length) {
+      break;
+    }
+
+    if (summary?.totalServers && allItems.length >= summary.totalServers) {
+      break;
+    }
+
+    if (pageItems.length < MTA_COMMUNITY_PER_PAGE) {
+      break;
+    }
+  }
+
+  if (!allItems.length) {
+    throw new Error("MTA Community fallback returned no server rows.");
+  }
+
+  return {
+    version: 0,
+    flags: 0,
+    sequenceNumber: 0,
+    declaredCount: summary?.totalServers || allItems.length,
+    totalServers: summary?.totalServers || allItems.length,
+    onlineCount: allItems.filter((item) => item.playersOnline > 0).length,
+    totalPlayers: summary?.totalPlayers || allItems.reduce((sum, item) => sum + item.playersOnline, 0),
+    items: allItems,
+    sourceUrl: buildMtaCommunityPageUrl(1),
+    fetchedAt: summary?.fetchedAt || new Date().toISOString(),
+    cached: false,
+    stale: false,
+    source: "community",
+    message: masterlistError?.message
+      ? `MTA masterlist failed, using MTA Community fallback: ${masterlistError.message}`
+      : "Using MTA Community fallback."
+  };
+}
+
 async function getMtaMasterlistPayload() {
   const cacheKey = "mta-masterlist:all";
   const cached = getCachedPayload(cacheKey, MTA_MASTERLIST_CACHE_TTL_MS);
@@ -1579,17 +1740,39 @@ async function getMtaMasterlistPayload() {
     };
   }
 
-  const rawBuffer = await getBinary(MTA_MASTERLIST_URL, "MTA masterlist", MTA_MASTERLIST_TIMEOUT_MS);
-  const parsed = parseMtaMasterlistBuffer(rawBuffer);
-  const payload = {
-    ...parsed,
-    sourceUrl: MTA_MASTERLIST_URL,
-    fetchedAt: new Date().toISOString(),
-    cached: false
-  };
+  try {
+    const rawBuffer = await getBinary(MTA_MASTERLIST_URL, "MTA masterlist", MTA_MASTERLIST_TIMEOUT_MS);
+    const parsed = parseMtaMasterlistBuffer(rawBuffer);
+    const payload = {
+      ...parsed,
+      sourceUrl: MTA_MASTERLIST_URL,
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+      stale: false,
+      source: "masterlist",
+      message: ""
+    };
 
-  setCachedPayload(cacheKey, payload);
-  return payload;
+    setCachedPayload(cacheKey, payload);
+    return payload;
+  } catch (error) {
+    const staleEntry = getRawCachedEntry(cacheKey);
+
+    if (staleEntry?.payload?.items && Array.isArray(staleEntry.payload.items) && staleEntry.payload.items.length) {
+      return {
+        ...staleEntry.payload,
+        cached: true,
+        stale: true,
+        message: error?.message
+          ? `MTA masterlist failed, using stale cache: ${error.message}`
+          : "MTA masterlist failed, using stale cache."
+      };
+    }
+
+    const fallbackPayload = await getMtaCommunityFallbackPayload(error);
+    setCachedPayload(cacheKey, fallbackPayload);
+    return fallbackPayload;
+  }
 }
 
 function getRequestedMtaMasterlistOptions(query = {}) {
@@ -1697,7 +1880,10 @@ function buildMtaMasterlistResponse(masterlistPayload, options) {
     returnedPlayers: returnedItems.reduce((sum, item) => sum + item.playersOnline, 0),
     fetchedAt: masterlistPayload.fetchedAt,
     cached: Boolean(masterlistPayload.cached),
+    stale: Boolean(masterlistPayload.stale),
     sourceUrl: masterlistPayload.sourceUrl,
+    source: sanitizeMasterlistText(masterlistPayload.source || "masterlist"),
+    message: sanitizeMasterlistText(masterlistPayload.message),
     filters: {
       includeEmpty: options.includeEmpty,
       minPlayers: options.minPlayers,
@@ -1771,7 +1957,7 @@ app.get("/", (req, res) => {
       serverStatus: "/api/server-status",
       mtaStatusList: "/api/mta-status-list?server=Miami%20RP@46.174.50.52:22101",
       serverStatusList: "/api/server-status-list?server=Miami%20RP@46.174.50.52:22101",
-      mtaPublicServers: "/api/mta-public-servers?includeEmpty=1&limit=5000&sort=players-desc",
+      mtaPublicServers: "/api/mta-public-servers?includeEmpty=1&limit=all&sort=players-desc",
       mtaMonitor: "/mta-monitor",
       mtaMonitorEmbed: "/mta-monitor-embed",
       mtaServerList: "/mta-serverlist",
